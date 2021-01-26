@@ -1,0 +1,48 @@
+{
+  "name": "st-device-sdk-c",
+  "version": "1.5.5",
+  "description": "Platformio library implementation Samsung SmartThings st-device-sdk-c",
+  "keywords": "sensors, devices, esp32, Samsung, SmartThings",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bafi21/st-device-sdk-c.git"
+  },
+  "homepage": "https://github.com/bafi21/st-device-sdk-c",
+
+  "frameworks": [ "arduino", "espidf", "freertos" ],
+  "platforms": "espressif8266, espressif32",
+	"build": {
+		"flags": [
+			"-DCONFIG_STDK_IOT_CORE",
+			"-DCONFIG_STDK_IOT_CORE_EASYSETUP_HTTP_USE_SOCKET_API",
+			"-DCONFIG_STDK_IOT_CORE_BSP_SUPPORT=ESP32",
+			"-DCONFIG_STDK_IOT_CORE_NET_INTERFACE=mbedTLS",
+			"-DCONFIG_STDK_IOT_CORE_OS_SUPPORT=FreeRTOS",
+			"-I src/include",
+			"-I src/include/os",
+			"-I src/include/bsp",
+			"-I src/include/bsp/esp32",
+			"-I src/include/external",
+			"-I src/include/mqtt",
+			"-I src/port/net/mbedtls",
+			"-I src/deps/cbor/tinycbor/src"
+		],
+        "srcFilter": [
+            "+<*.c>",
+			"+<security/*.c>",
+			"+<security/helper/mbedtls/*.c>",
+			"+<security/helper/libsodium/*.c>",
+			"+<security/backend/software/*.c>",
+            "+<port/os/freertos/*.c>",
+            "+<port/bsp/esp32/*.c>",
+            "+<port/net/mbedtls/*.c>",
+            "+<mqtt/client/*.c>",
+            "+<mqtt/packet/*.c>",
+			"+<easysetup/*.c>",
+			"+<easysetup/http/*.c>",
+			"+<easysetup/http/tcp/*.c>",
+            "+<include/*.h>",
+            "+<include/os/*.h>"
+        ]
+	}
+}
