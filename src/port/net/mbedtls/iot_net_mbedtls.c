@@ -22,6 +22,11 @@
 #include <errno.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <iot_util.h>
+#if defined(CONFIG_STDK_IOT_CORE_OS_SUPPORT_POSIX)
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#endif
 
 #include "iot_main.h"
 #include "iot_debug.h"
@@ -125,6 +130,129 @@ static void _iot_net_cleanup_platform_context(iot_net_interface_t *net)
 	mbedtls_ctr_drbg_free(&net->context.ctr_drbg);
 	mbedtls_entropy_free(&net->context.entropy);
 }
+
+#if defined(CONFIG_MBEDTLS_SSL_ASYNC_PRIVATE)
+static int _iot_net_tls_external_sign(mbedtls_ssl_context *ssl,
+		mbedtls_x509_crt *cert, mbedtls_md_type_t md_alg,
+		const unsigned char *hash, size_t hash_len)
+{
+	iot_security_context_t *security_context;
+	iot_security_key_type_t key_type;
+	iot_security_buffer_t hash_buf = { 0 };
+	iot_security_buffer_t sig_buf = { 0 };
+	int ret = 0;
+
+	if (ssl == NULL || hash == NULL || hash_len == 0) {
+		IOT_ERROR("invalid input parameter");
+		return MBEDTLS_ERR_PK_INVALID_ALG;
+	}
+
+	if (md_alg != MBEDTLS_MD_SHA256) {
+		IOT_ERROR("SHA256 only supported");
+		return MBEDTLS_ERR_PK_INVALID_ALG;
+	}
+
+	security_context = iot_security_init();
+	if (!security_context) {
+		return MBEDTLS_ERR_PK_BAD_INPUT_DATA;
+	}
+
+	if (iot_security_pk_init(security_context)) {
+		iot_security_deinit(security_context);
+		return MBEDTLS_ERR_PK_BAD_INPUT_DATA;
+	}
+
+	if (iot_security_pk_get_key_type(security_context, &key_type)) {
+		ret = MBEDTLS_ERR_PK_BAD_INPUT_DATA;
+		goto cleanup;
+	}
+
+	switch (key_type) {
+	case IOT_SECURITY_KEY_TYPE_ECCP256:
+	case IOT_SECURITY_KEY_TYPE_RSA2048:
+		hash_buf.p = (unsigned char *)hash;
+		hash_buf.len = hash_len;
+		if (iot_security_pk_sign(security_context, &hash_buf, &sig_buf)) {
+			ret = MBEDTLS_ERR_PK_KEY_INVALID_FORMAT;
+			break;
+		}
+
+		mbedtls_ssl_set_async_operation_data(ssl, &sig_buf);
+		break;
+	default:
+		IOT_ERROR("'%d' is not supported algorithm", key_type);
+		ret = MBEDTLS_ERR_PK_UNKNOWN_PK_ALG;
+		break;
+	}
+
+cleanup:
+	(void)iot_security_pk_deinit(security_context);
+	(void)iot_security_deinit(security_context);
+
+	return ret;
+}
+
+static int _iot_net_tls_external_resume(mbedtls_ssl_context *ssl,
+		unsigned char *output, size_t *output_len, size_t output_size)
+{
+	iot_security_buffer_t *sig_buf;
+
+	if (ssl == NULL || output == NULL || output_len == NULL) {
+		IOT_ERROR("invalid input parameter");
+		return MBEDTLS_ERR_PK_INVALID_ALG;
+	}
+
+	sig_buf = (iot_security_buffer_t *)mbedtls_ssl_get_async_operation_data(ssl);
+	if (!sig_buf) {
+		IOT_ERROR("cannot retrieve signature buffer");
+		return MBEDTLS_ERR_PK_BAD_INPUT_DATA;
+	}
+
+	if (sig_buf->len > output_size) {
+		IOT_ERROR("output buffer is too small");
+		return MBEDTLS_ERR_SSL_BUFFER_TOO_SMALL;
+	}
+
+	memcpy(output, sig_buf->p, sig_buf->len);
+	*output_len = sig_buf->len;
+
+	memset(sig_buf->p, 0, sig_buf->len);
+	iot_os_free(sig_buf->p);
+
+	return 0;
+}
+
+static void _iot_net_tls_external_cancel(mbedtls_ssl_context *ssl)
+{
+	iot_security_buffer_t *sig_buf;
+
+	if (ssl == NULL) {
+		IOT_ERROR("invalid input parameter");
+		return;
+	}
+
+	sig_buf = (iot_security_buffer_t *)mbedtls_ssl_get_async_operation_data(ssl);
+	if (sig_buf) {
+		memset(sig_buf->p, 0, sig_buf->len);
+		iot_os_free(sig_buf->p);
+	}
+}
+
+// TODO : will be implemented as static
+void iot_net_tls_external_private(mbedtls_ssl_config *conf)
+{
+	mbedtls_ssl_conf_async_private_cb(conf,
+			_iot_net_tls_external_sign,
+			NULL,
+			_iot_net_tls_external_resume,
+			_iot_net_tls_external_cancel,
+			NULL);
+}
+#else
+void iot_net_tls_external_private(mbedtls_ssl_config *conf)
+{
+}
+#endif /* CONFIG_MBEDTLS_SSL_ASYNC_PRIVATE */
 
 static iot_error_t _iot_net_tls_connect(iot_net_interface_t *net)
 {
@@ -260,12 +388,54 @@ static iot_error_t _iot_net_tls_connect(iot_net_interface_t *net)
 		IOT_INFO("%s\n", buf);
 	}
 #endif
+
 	return IOT_ERROR_NONE;
 
 exit:
 	_iot_net_cleanup_platform_context(net);
 
 	return IOT_ERROR_NET_CONNECT;
+}
+
+static iot_error_t _iot_net_tcp_keepalive(iot_net_interface_t *net, unsigned int idle, unsigned int count, unsigned int intval)
+{
+	iot_error_t err;
+	int socket;
+	int keepAlive = 1;
+	int ret;
+
+	err = _iot_net_check_interface(net);
+	if (err) {
+		return err;
+	}
+
+	socket = net->context.server_fd.fd;
+	ret = setsockopt(socket, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(keepAlive));
+	if (ret)
+	{
+		IOT_WARN("fail to set KEEPALIVE error %d", ret);
+		return IOT_ERROR_BAD_REQ;
+	}
+	ret = setsockopt(socket, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+	if (ret)
+	{
+		IOT_WARN("fail to set KEEPALIVEIDLE error %d", ret);
+		return IOT_ERROR_BAD_REQ;
+	}
+	ret = setsockopt(socket, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+	if (ret)
+	{
+		IOT_WARN("fail to set KEEPALIVECOUNT error %d", ret);
+		return IOT_ERROR_BAD_REQ;
+	}
+	ret = setsockopt(socket, IPPROTO_TCP, TCP_KEEPINTVL, &intval, sizeof(intval));
+	if (ret)
+	{
+		IOT_WARN("fail to set KEEPALIVEINTERVAL error %d", ret);
+		return IOT_ERROR_BAD_REQ;
+	}
+
+	return IOT_ERROR_NONE;
 }
 
 static void _iot_net_tls_disconnect(iot_net_interface_t *net)
@@ -350,6 +520,7 @@ iot_error_t iot_net_init(iot_net_interface_t *net)
 	}
 
 	net->connect = _iot_net_tls_connect;
+	net->tcp_keepalive = _iot_net_tcp_keepalive;
 	net->disconnect = _iot_net_tls_disconnect;
 	net->select = _iot_net_select;
 	net->read = _iot_net_tls_read;

@@ -101,7 +101,7 @@ IOT_EVENT* st_cap_create_attr_with_id(IOT_CAP_HANDLE *cap_handle, const char *at
 	evt_data = (iot_cap_evt_data_t *)st_cap_create_attr(cap_handle, attribute, value, unit, data);
 
 	if (evt_data != NULL && command_id != NULL) {
-		evt_data->command_id = iot_os_strdup(command_id);
+		evt_data->options.command_id = iot_os_strdup(command_id);
 	}
 
 	return (IOT_EVENT*)evt_data;
@@ -207,6 +207,12 @@ static IOT_EVENT* _iot_cap_create_attr(const char *attribute,
 IOT_EVENT* st_cap_create_attr(IOT_CAP_HANDLE *cap_handle, const char *attribute,
 			iot_cap_val_t *value, const char *unit, const char *data)
 {
+	return st_cap_create_attr_with_option(cap_handle, attribute, value, unit, data, NULL);
+}
+
+IOT_EVENT* st_cap_create_attr_with_option(IOT_CAP_HANDLE *cap_handle, const char *attribute,
+			iot_cap_val_t *value, const char *unit, const char *data, iot_cap_attr_option_t *options)
+{
 	iot_cap_evt_data_t* evt_data = NULL;
 
 	if (cap_handle == NULL) {
@@ -219,6 +225,15 @@ IOT_EVENT* st_cap_create_attr(IOT_CAP_HANDLE *cap_handle, const char *attribute,
 		return NULL;
 
 	evt_data->ref_cap = (struct iot_cap_handle *)cap_handle;
+
+	if (options != NULL)
+	{
+		evt_data->options.state_change = options->state_change;
+		if (options->command_id)
+		{
+			evt_data->options.command_id = iot_os_strdup(options->command_id);
+		}
+	}
 
 	return (IOT_EVENT*)evt_data;
 }
@@ -406,7 +421,7 @@ DEPRECATED int st_cap_attr_send(IOT_CAP_HANDLE *cap_handle,
 	}
 
 	ctx = handle->ctx;
-	if (ctx->curr_state < IOT_STATE_CLOUD_CONNECTING) {
+	if (ctx->curr_state < IOT_STATE_CLOUD_CONNECTING || ctx->evt_mqttcli == NULL) {
 		IOT_DUMP(IOT_DEBUG_LEVEL_ERROR, IOT_DUMP_CAPABILITY_SEND_EVENT_NO_CONNECT_ERROR, ctx->curr_state, 0);
 		IOT_ERROR("Target has not connected to server yet!!");
 		return IOT_ERROR_BAD_REQ;
@@ -496,7 +511,7 @@ int st_cap_send_attr(IOT_EVENT *event[], uint8_t evt_num)
 	}
 	ctx = evt_data[0]->ref_cap->ctx;
 
-	if (ctx->curr_state < IOT_STATE_CLOUD_CONNECTING) {
+	if (ctx->curr_state < IOT_STATE_CLOUD_CONNECTING || ctx->evt_mqttcli == NULL) {
 		IOT_DUMP(IOT_DEBUG_LEVEL_ERROR, IOT_DUMP_CAPABILITY_SEND_EVENT_NO_CONNECT_ERROR, ctx->curr_state, 0);
 		IOT_ERROR("Target has not connected to server yet!!");
 		return IOT_ERROR_BAD_REQ;
@@ -585,25 +600,7 @@ iot_error_t _iot_parse_noti_data(void *data, iot_noti_data_t *noti_data)
 	char *payload = NULL;
 	char time_str[11] = {0,};
 
-#if defined(STDK_IOT_CORE_SERIALIZE_CBOR)
-	char *payload_json = NULL;
-	size_t payload_json_len = 0;
-
-	if (iot_serialize_cbor2json((uint8_t *)data, strlen(data), &payload_json, &payload_json_len)) {
-		IOT_ERROR("cbor2json failed");
-		return IOT_ERROR_BAD_REQ;
-	}
-
-	if ((payload_json == NULL) || (payload_json_len == 0)) {
-		IOT_ERROR("json buffer is null");
-		return IOT_ERROR_BAD_REQ;
-	}
-
-	json = JSON_PARSE(payload_json);
-	free(payload_json);
-#else
 	json = JSON_PARSE(data);
-#endif
 	if (json == NULL) {
 		IOT_ERROR("Cannot parse by json");
 		return IOT_ERROR_BAD_REQ;
@@ -798,25 +795,7 @@ void iot_cap_sub_cb(iot_cap_handle_list_t *cap_handle_list, char *payload)
 		return;
 	}
 
-#if defined(STDK_IOT_CORE_SERIALIZE_CBOR)
-	char *payload_json = NULL;
-	size_t payload_json_len = 0;
-
-	if (iot_serialize_cbor2json((uint8_t *)payload, strlen(payload), &payload_json, &payload_json_len)) {
-		IOT_ERROR("cbor2json failed");
-		return;
-	}
-
-	if ((payload_json == NULL) || (payload_json_len == 0)) {
-		IOT_ERROR("json buffer is null");
-		return;
-	}
-
-	json = JSON_PARSE(payload_json);
-	free(payload_json);
-#else
 	json = JSON_PARSE(payload);
-#endif
 	if (json == NULL) {
 		IOT_ERROR("Cannot parse by json");
 		goto out;
@@ -992,9 +971,9 @@ static JSON_H *_iot_make_evt_data(const char* component, const char* capability,
 
 	evt_item = JSON_CREATE_OBJECT();
 
-	if (evt_data->command_id != NULL) {
+	if (evt_data->options.command_id != NULL) {
 		/* commandId */
-		JSON_ADD_STRING_TO_OBJECT(evt_item, "commandId", evt_data->command_id);
+		JSON_ADD_STRING_TO_OBJECT(evt_item, "commandId", evt_data->options.command_id);
 	}
 
 	/* component */
@@ -1050,6 +1029,9 @@ static JSON_H *_iot_make_evt_data(const char* component, const char* capability,
 		IOT_WARN("Cannot add optional timestamp value");
 	else
 		JSON_ADD_STRING_TO_OBJECT(prov_data, "timestamp", time_in_ms);
+
+	if (evt_data->options.state_change)
+		JSON_ADD_STRING_TO_OBJECT(prov_data, "stateChange", "Y");
 
 	JSON_ADD_ITEM_TO_OBJECT(evt_item, "providerData", prov_data);
 
@@ -1147,8 +1129,8 @@ static void _iot_free_evt_data(iot_cap_evt_data_t* evt_data)
 		iot_os_free(evt_data->evt_value_data);
 	}
 
-	if (evt_data->command_id != NULL) {
-		iot_os_free(evt_data->command_id);
+	if (evt_data->options.command_id != NULL) {
+		iot_os_free(evt_data->options.command_id);
 	}
 }
 /* External API */

@@ -7,8 +7,21 @@
 This repository provides a tools to generate key pair and batch file for Developer Workspace.
 Ed25519 is a signature algorithm with EdDSA over curve25519.
 
+## Remark
+
+This utility is limited to generate key pairs for test devices.
+Each manufacturer should use their own method to meet security requirements for commercial devices.  
+
+For example
+ * The operation of key management facility must be conducted in a secure manner.
+ * If device key pair is generated outside device and later injected, the generated private key must only be maintained outside the device in encrypted form and should be deleted after successful injection.
+ * The generated key pairs must be globally uniquely identified independently based on its identifiers.
+
+Please refer security guideline document which is available at `Publish` menu of Developer Workspace.
+
 ## Requirement
 
+* The length of serial number should be between 8 and 30.
 * The generated private key must only be maintained outside the device in encrypted form and should be deleted after successful injection to device.
 * The generated key pairs must be globally uniquely identified independently based on its identifiers.
 * The key management facility must provide a way to check the validity of each key pair for known compromised devices.
@@ -23,7 +36,7 @@ pip install pynacl --user
 ## Usage
 
 ```sh
-stdk-keygen.py [-h] [--mnid MNID] [--firmware version] [--input csv] [--output csv] [--nv {esp}] [--qr {individual,commercial}] [--folder FOLDER]
+stdk-keygen.py [-h] [--mnid MNID] [--firmware version] [--input csv] [--output csv] [--nv {esp}] [--qr] [--path PATH]
 ```
 
 ### Individual
@@ -73,7 +86,7 @@ $ cat output_STDKTEST****7KXw/device_info.json
 
 You can generate QR code which could be helpful to add your device in ST app.
 ```sh
-$ python stdk-keygen.py --qr individual --folder [location of onboarding_config.json]
+$ python stdk-keygen.py --qr --path [location of onboarding_config.json]
 Use following serial number and public key
 for the identity of your device in Developer Workspace.
 
@@ -127,7 +140,7 @@ output_bulk/
 ```
 You can generate QR code for commercial
 ```sh
-$ python stdk-keygen.py --input sn.csv --qr commercial --folder [location of onboarding_config.json]
+$ python stdk-keygen.py --input sn.csv --qr --path [location of onboarding_config.json]
 Loading sn.csv...
 ...
 Batch file has been saved: output_bulk/2020****_193746/DI_Batch_2020****_193746.csv

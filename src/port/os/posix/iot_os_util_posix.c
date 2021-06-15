@@ -59,7 +59,7 @@ int iot_os_thread_create(void * thread_function, const char* name, int stack_siz
 	pthread_attr_t attr;
 
 	if (thread == NULL)
-		return IOT_ERROR_MEM_ALLOC;
+		return IOT_OS_FALSE;
 
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
@@ -213,6 +213,7 @@ typedef struct {
 typedef struct {
 	event_t group[EVENT_MAX];
 	unsigned char event_status;
+	pthread_mutex_t mutex;
 } eventgroup_t;
 
 iot_os_eventgroup* iot_os_eventgroup_create(void)
@@ -220,6 +221,11 @@ iot_os_eventgroup* iot_os_eventgroup_create(void)
 	eventgroup_t *eventgroup = malloc(sizeof(eventgroup_t));
 	if (eventgroup == NULL)
 		return NULL;
+
+	if (pthread_mutex_init(&eventgroup->mutex, NULL)) {
+		free(eventgroup);
+		return NULL;
+	}
 
 	for (int i = 0; i < EVENT_MAX; i++) {
 		eventgroup->group[i].id = (1 << i);
@@ -229,6 +235,7 @@ iot_os_eventgroup* iot_os_eventgroup_create(void)
 			return NULL;
 		}
 	}
+
 	eventgroup->event_status = 0;
 
 	return eventgroup;
@@ -242,7 +249,7 @@ void iot_os_eventgroup_delete(iot_os_eventgroup* eventgroup_handle)
 		close(eventgroup->group[i].fd[0]);
 		close(eventgroup->group[i].fd[1]);
 	}
-
+	pthread_mutex_destroy(&eventgroup->mutex);
 	free(eventgroup);
 }
 
@@ -275,11 +282,14 @@ unsigned char iot_os_eventgroup_wait_bits(iot_os_eventgroup* eventgroup_handle,
 	tv.tv_usec = (wait_time_ms % 1000) * 1000;
 
 	int ret = select(fd_max + 1, &readfds, NULL, NULL, &tv);
+	pthread_mutex_lock(&eventgroup->mutex);
 	if (ret == -1) {
 		// Select Error
+		pthread_mutex_unlock(&eventgroup->mutex);
 		return 0;
 	} else if (ret == 0) {
 		// Select Timeout
+		pthread_mutex_unlock(&eventgroup->mutex);
 		return (unsigned int)eventgroup->event_status;
 	} else {
 		// read pipe
@@ -288,7 +298,7 @@ unsigned char iot_os_eventgroup_wait_bits(iot_os_eventgroup* eventgroup_handle,
 				if (FD_ISSET(eventgroup->group[i].fd[0], &readfds)) {
 					memset(buf, 0, sizeof(buf));
 					read_size = read(eventgroup->group[i].fd[0], buf, sizeof(buf));
-					IOT_DEBUG("read_size = %d", read_size);
+					IOT_DEBUG("read_size = %d (%d)", read_size, i);
 					bits |= eventgroup->group[i].id;
 				}
 			}
@@ -298,6 +308,7 @@ unsigned char iot_os_eventgroup_wait_bits(iot_os_eventgroup* eventgroup_handle,
 		if (clear_on_exit) {
 			eventgroup->event_status &= ~(bits);
 		}
+		pthread_mutex_unlock(&eventgroup->mutex);
 
 		return (unsigned int)event_status_backup;
 	}
@@ -310,19 +321,21 @@ int iot_os_eventgroup_set_bits(iot_os_eventgroup* eventgroup_handle,
 	unsigned char bits = 0;
 	ssize_t write_size = 0;
 
+	pthread_mutex_lock(&eventgroup->mutex);
 	for (int i = 0; i < EVENT_MAX; i++) {
         if (eventgroup->group[i].id == (eventgroup->group[i].id & eventgroup->event_status)) {
-            IOT_DEBUG("already set 0x08x", eventgroup->group[i].id);
+            IOT_DEBUG("already set 0x%08x (%d)", eventgroup->group[i].id, i);
             continue;
         }
 		if (eventgroup->group[i].id == (eventgroup->group[i].id & bits_to_set)) {
 			write_size = write(eventgroup->group[i].fd[1], "Set", strlen("Set"));
-			IOT_DEBUG("write_size = %d", write_size);
+			IOT_DEBUG("write_size = %d (%d)", write_size, i);
 			bits |= eventgroup->group[i].id;
 		}
 	}
 
 	eventgroup->event_status |= bits;
+	pthread_mutex_unlock(&eventgroup->mutex);
 
 	return IOT_OS_TRUE;
 }
@@ -332,8 +345,10 @@ int iot_os_eventgroup_clear_bits(iot_os_eventgroup* eventgroup_handle,
 {
     eventgroup_t *eventgroup = eventgroup_handle;
 
+	pthread_mutex_lock(&eventgroup->mutex);
     eventgroup->event_status &= ~(bits_to_clear);
     // TODO: clear written event to pipe
+	pthread_mutex_unlock(&eventgroup->mutex);
 
 	return IOT_OS_TRUE;
 }
@@ -358,28 +373,38 @@ int iot_os_mutex_init(iot_os_mutex* mutex)
 
 int iot_os_mutex_lock(iot_os_mutex* mutex)
 {
+	int ret;
+
 	if (!mutex || !mutex->sem) {
 		return IOT_OS_FALSE;
 	}
 
 	pthread_mutex_t* mutex_p = mutex->sem;
 
-	pthread_mutex_lock(mutex_p);
-
-	return IOT_OS_TRUE;
+	ret = pthread_mutex_trylock(mutex_p);
+	if (ret) {
+		return IOT_OS_FALSE;
+	} else {
+		return IOT_OS_TRUE;
+	}
 }
 
 int iot_os_mutex_unlock(iot_os_mutex* mutex)
 {
+	int ret;
+
 	if (!mutex || !mutex->sem) {
 		return IOT_OS_FALSE;
 	}
 
 	pthread_mutex_t* mutex_p = mutex->sem;
 
-	pthread_mutex_unlock(mutex_p);
-
-	return IOT_OS_TRUE;
+	ret = pthread_mutex_unlock(mutex_p);
+	if (ret) {
+		return IOT_OS_FALSE;
+	} else {
+		return IOT_OS_TRUE;
+	}
 }
 
 void iot_os_mutex_destroy(iot_os_mutex* mutex)
@@ -390,6 +415,8 @@ void iot_os_mutex_destroy(iot_os_mutex* mutex)
 	pthread_mutex_t* mutex_p = mutex->sem;
 
 	pthread_mutex_destroy(mutex_p);
+	free(mutex_p);
+	mutex->sem = NULL;
 }
 
 /* Delay */
@@ -405,7 +432,7 @@ void iot_os_delay(unsigned int delay_ms)
 
 void iot_os_timer_count_ms(iot_os_timer timer, unsigned int timeout_ms)
 {
-	timer_t timer_id = timer;
+	timer_t* timer_id = (timer_t*) timer;
 	struct itimerspec it;
 
 	it.it_interval.tv_sec = 0;
@@ -413,7 +440,7 @@ void iot_os_timer_count_ms(iot_os_timer timer, unsigned int timeout_ms)
 	it.it_value.tv_sec = timeout_ms / 1000;
 	it.it_value.tv_nsec = (timeout_ms % 1000) * 1000000;
 
-	int ret = timer_settime(timer_id, 0, &it, NULL);
+	int ret = timer_settime(*timer_id, 0, &it, NULL);
 	if (ret == -1) {
 		return;
 	}
@@ -421,11 +448,11 @@ void iot_os_timer_count_ms(iot_os_timer timer, unsigned int timeout_ms)
 
 unsigned int iot_os_timer_left_ms(iot_os_timer timer)
 {
-	timer_t timer_id = timer;
+	timer_t* timer_id = (timer_t*) timer;
 	struct itimerspec it = {0,};
 	unsigned int left = 0;
 
-	int ret = timer_gettime(timer_id, &it);
+	int ret = timer_gettime(*timer_id, &it);
 	if (ret == -1) {
 		return 0;
 	}
@@ -435,10 +462,10 @@ unsigned int iot_os_timer_left_ms(iot_os_timer timer)
 
 char iot_os_timer_isexpired(iot_os_timer timer)
 {
-	timer_t timer_id = timer;
+	timer_t* timer_id = (timer_t*) timer;
 	struct itimerspec it = {0,};
 
-	int ret = timer_gettime(timer_id, &it);
+	int ret = timer_gettime(*timer_id, &it);
 	if (ret == -1) {
 		return IOT_OS_TRUE;
 	}
@@ -463,21 +490,22 @@ int iot_os_timer_init(iot_os_timer *timer)
 	sig.sigev_value.sival_ptr = timer_id;
 	int ret = timer_create(CLOCK_REALTIME, &sig, timer_id);
 	if (ret == -1) {
+		free(timer_id);
 		return IOT_ERROR_BAD_REQ;
 	}
 
-	*timer = *timer_id;
+	*timer = timer_id;
+
 	return IOT_ERROR_NONE;
 }
 
 void iot_os_timer_destroy(iot_os_timer *timer)
 {
-	timer_t timer_id = *timer;
+	timer_t* timer_id = (timer_t*) *timer;
 
-	int ret = timer_delete(timer_id);
-	if (ret == -1) {
-		return;
-	}
+	timer_delete(*timer_id);
+	free(timer_id);
+	timer = NULL;
 }
 
 void *iot_os_malloc(size_t size)
