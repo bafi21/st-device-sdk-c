@@ -1,6 +1,6 @@
 /* ***************************************************************************
  *
- * Copyright 2020 Samsung Electronics All Rights Reserved.
+ * Copyright 2020-2021 Samsung Electronics All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,8 @@
  * language governing permissions and limitations under the License.
  *
  ****************************************************************************/
-#include "iot_easysetup_http_socket.h"
+#include "iot_easysetup_http_impl.h"
 #include "iot_easysetup.h"
-#include "../easysetup_http.h"
 
 #define HTTP_PORT 8888
 
@@ -100,9 +99,9 @@ iot_error_t http_packet_read(HTTP_CONN_H *handle, char *rx_buffer, size_t rx_buf
 			return IOT_ERROR_EASYSETUP_HTTP_RECV_FAIL;
 		}
 		else if (len == 0) {
-			IOT_WARN("Connection closed");
+			IOT_WARN("peer connection closed");
 			IOT_ES_DUMP(IOT_DEBUG_LEVEL_WARN, IOT_DUMP_EASYSETUP_SOCKET_CON_CLOSE, 0);
-			return IOT_ERROR_EASYSETUP_HTTP_CONN_CLOSED;
+			return IOT_ERROR_EASYSETUP_HTTP_PEER_CONN_CLOSED;
 		}
 		else {
 			existing_len += len;
@@ -143,9 +142,9 @@ iot_error_t http_packet_read_remaining(HTTP_CONN_H *handle, char *rx_buffer, siz
 			return IOT_ERROR_EASYSETUP_HTTP_RECV_FAIL;
 		}
 		else if (len == 0) {
-			IOT_ERROR("Connection closed");
+			IOT_ERROR("peer connection closed");
 			IOT_ES_DUMP(IOT_DEBUG_LEVEL_ERROR, IOT_DUMP_EASYSETUP_SOCKET_CON_CLOSE, 0);
-			return IOT_ERROR_EASYSETUP_HTTP_CONN_CLOSED;
+			return IOT_ERROR_EASYSETUP_HTTP_PEER_CONN_CLOSED;
 		}
 		else {
 			total_recv_len += len;

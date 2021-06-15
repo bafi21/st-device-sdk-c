@@ -33,7 +33,8 @@
 #include "security/iot_security_helper.h"
 
 #include "JSON.h"
-#define ONBOARDINGID_MAX_LEN	13
+#define ONBOARDINGID_E4_MAX_LEN	13
+#define ONBOARDINGID_E5_MAX_LEN	14
 #define IOT_STATE_TIMEOUT_MAX_MS	(900000) /* 15 min */
 
 static void _set_cmd_status(struct iot_context *ctx, enum iot_command_type cmd_type)
@@ -134,6 +135,7 @@ iot_error_t iot_wifi_ctrl_request(struct iot_context *ctx,
 		}
 		break;
 
+#if defined(CONFIG_STDK_IOT_CORE_EASYSETUP_DISCOVERY_SSID)
 	case IOT_WIFI_MODE_SOFTAP:
 		/*wifi soft-ap mode w/ ssid E4 format*/
 		iot_err = iot_easysetup_create_ssid(&(ctx->devconf),
@@ -146,7 +148,7 @@ iot_error_t iot_wifi_ctrl_request(struct iot_context *ctx,
 		snprintf(wifi_conf.pass, sizeof(wifi_conf.pass), "1111122222");
 		wifi_conf.authmode = IOT_WIFI_AUTH_WPA_WPA2_PSK;
 		break;
-
+#endif
 	case IOT_WIFI_MODE_SCAN:
 		send_cmd = false;
 
@@ -278,6 +280,26 @@ void iot_api_onboarding_config_mem_free(struct iot_devconf_prov_data *devconf)
 		iot_os_free(devconf->dip);
 }
 
+static bool is_valid_onboarding_id_len(size_t len, unsigned char ssid_version)
+{
+	size_t max_len;
+
+	max_len = (ssid_version == 4 ? ONBOARDINGID_E4_MAX_LEN : ONBOARDINGID_E5_MAX_LEN);
+	if (len > max_len) {
+		return false;
+	}
+
+	return true;
+}
+
+static bool is_valid_ssid_version(unsigned char version)
+{
+	if (version == 4 || version == 5) {
+		return true;
+	}
+	return false;
+}
+
 static const char name_onboardingConfig[] = "onboardingConfig";
 static const char name_deviceOnboardingId[] = "deviceOnboardingId";
 static const char name_mnId[] = "mnId";
@@ -287,6 +309,7 @@ static const char name_deviceTypeId[] = "deviceTypeId";
 static const char name_ownershipValidationTypes[] = "ownershipValidationTypes";
 static const char name_identityType[] = "identityType";
 static const char name_deviceIntegrationProfileId[] = "deviceIntegrationProfileKey";
+static const char name_ssidVersion[] = "ssidVersion";
 
 iot_error_t iot_api_onboarding_config_load(unsigned char *onboarding_config,
 		unsigned int onboarding_config_len, struct iot_devconf_prov_data *devconf)
@@ -302,6 +325,7 @@ iot_error_t iot_api_onboarding_config_load(unsigned char *onboarding_config,
 	char *setupid = NULL;
 	char *vid = NULL;
 	char *devicetypeid = NULL;
+	unsigned char ssid_version;
 	unsigned int ownership_validation_type = 0;
 	iot_security_key_type_t pk_type;
 	size_t str_len = 0;
@@ -332,12 +356,29 @@ iot_error_t iot_api_onboarding_config_load(unsigned char *onboarding_config,
 		goto load_out;
 	}
 
+	/* SSID version, Optional */
+	item = JSON_GET_OBJECT_ITEM(config, name_ssidVersion);
+	if (item) {
+		ssid_version = (unsigned char) JSON_GET_NUMBER_VALUE(item);
+		if (!is_valid_ssid_version(ssid_version))
+		{
+#if defined(CONFIG_STDK_IOT_CORE_LOG_LEVEL_ERROR)
+			current_name = (char *)name_ssidVersion;
+#endif
+			iot_err = IOT_ERROR_UNINITIALIZED;
+			goto load_out;
+		}
+	} else {
+		/* default version 4 */
+		ssid_version = 4;
+	}
+
 	/* device_onboarding_id */
 	item = JSON_GET_OBJECT_ITEM(config, name_deviceOnboardingId);
 	if (item) {
 		str_len = strlen(JSON_GET_STRING_VALUE(item));
 	}
-	if(!item || str_len > ONBOARDINGID_MAX_LEN) {
+	if(!item || !is_valid_onboarding_id_len(str_len, ssid_version)) {
 #if defined(CONFIG_STDK_IOT_CORE_LOG_LEVEL_ERROR)
 		current_name = (char *)name_deviceOnboardingId;
 #endif
@@ -469,8 +510,8 @@ iot_error_t iot_api_onboarding_config_load(unsigned char *onboarding_config,
 	item = JSON_GET_OBJECT_ITEM(config, name_identityType);
 	if (!item || !strcmp(JSON_GET_STRING_VALUE(item), "ED25519")) {
 		pk_type = IOT_SECURITY_KEY_TYPE_ED25519;
-	} else if (!strcmp(JSON_GET_STRING_VALUE(item), "CERTIFICATE")) {
-		pk_type = IOT_SECURITY_KEY_TYPE_RSA2048;
+	} else if (!strcmp(JSON_GET_STRING_VALUE(item), "X509")) {
+		pk_type = IOT_SECURITY_KEY_TYPE_ECCP256;
 	} else {
 #if defined(CONFIG_STDK_IOT_CORE_LOG_LEVEL_ERROR)
 		current_name = (char *)name_identityType;
@@ -531,6 +572,7 @@ iot_error_t iot_api_onboarding_config_load(unsigned char *onboarding_config,
 	if (new_dip) {
 		devconf->dip = new_dip;
 	}
+	devconf->ssid_version = ssid_version;
 
 	if (root)
 		JSON_DELETE(root);
@@ -1195,6 +1237,7 @@ iot_error_t iot_misc_info_store(iot_misc_info_t type, const void *in_data)
 	unsigned char old_hash[IOT_SECURITY_SHA256_LEN] = {0,};
 	unsigned char new_hash[IOT_SECURITY_SHA256_LEN] = {0,};
 	bool hash_chk = false;
+	bool old_misc_avail = false;
 
 	if (!in_data) {
 		iot_err = IOT_ERROR_INVALID_ARGS;
@@ -1208,13 +1251,15 @@ iot_error_t iot_misc_info_store(iot_misc_info_t type, const void *in_data)
 	} else {
 		json = JSON_PARSE(old_misc_info);
 		if (json == NULL) {
-			IOT_ERROR("old misc_info(%s) parsing failed", old_misc_info);
-			iot_err = IOT_ERROR_BAD_REQ;
-			goto misc_info_store_out;
+			IOT_WARN("old misc_info(%s/%u) parsing failed",
+				old_misc_info, old_misc_info_len);
+			json = JSON_CREATE_OBJECT();
+		} else {
+			old_misc_avail = true;
 		}
 	}
 
-	if ((old_misc_info != NULL) && (old_misc_info_len != 0)) {
+	if (old_misc_avail) {
 		iot_err = iot_security_sha256((const unsigned char *)old_misc_info,
 				old_misc_info_len, old_hash, sizeof(old_hash));
 		if (iot_err != IOT_ERROR_NONE) {
@@ -1224,8 +1269,10 @@ iot_error_t iot_misc_info_store(iot_misc_info_t type, const void *in_data)
 		}
 	}
 
-	iot_os_free(old_misc_info);
-	old_misc_info = NULL;
+	if (old_misc_info) {
+		iot_os_free(old_misc_info);
+		old_misc_info = NULL;
+	}
 
 	switch (type) {
 	case IOT_MISC_INFO_DIP:
@@ -1269,9 +1316,6 @@ iot_error_t iot_misc_info_store(iot_misc_info_t type, const void *in_data)
 misc_info_store_out:
 	if (new_misc_info)
 		iot_os_free(new_misc_info);
-
-	if (old_misc_info)
-		iot_os_free(old_misc_info);
 
 	if (json)
 		JSON_DELETE(json);

@@ -1,6 +1,6 @@
 /* ***************************************************************************
  *
- * Copyright 2019 Samsung Electronics All Rights Reserved.
+ * Copyright 2019-2021 Samsung Electronics All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,11 +18,11 @@
 
 #include <string.h>
 #include <stdbool.h>
-#include "FreeRTOS.h"
-#include "task.h"
-#include "queue.h"
-#include "event_groups.h"
-#include "semphr.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 
 #include "iot_error.h"
 #include "iot_os_util.h"
@@ -45,7 +45,10 @@ const char* iot_os_get_os_version_string()
 int iot_os_thread_create(void * thread_function, const char* name, int stack_size,
 		void* data, int priority, iot_os_thread* thread_handle)
 {
-	return xTaskCreate(thread_function, name, stack_size, data, priority, thread_handle);
+	BaseType_t ret;
+	ret = xTaskCreate(thread_function, name, stack_size, data, priority, thread_handle);
+
+	return (ret == pdTRUE) ? IOT_OS_TRUE : IOT_OS_FALSE;
 }
 
 void iot_os_thread_delete(iot_os_thread thread_handle)
